@@ -1,157 +1,197 @@
-#include "server.h"
+#include "network.h"
 #include "types.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <getopt.h>
+#include <string.h>
 #include <stdbool.h>
-#include "../support/message.h"
-#include "../support/log.h"
 
-/**************** main ****************/
-/* Entry point of the program. Validate correct usage, then call parseArgs and run game.
- *
- * Caller provides: 
- *  argc  number of command-line arguments
- *  argv  string array of the command-line arguments
- *
- * We return:
- *  0 on success, 1 on failure
- *
- * Usage:
- *  ./server map.txt [seed]
- *    map.txt - pathname for a map file
- *    seed - seed for random-number generator
- */
+// int init_server(char* address, void* suppliedptr, 
+//                 packet_t* (*client_message_callback)(void*, clientmsg_t*),
+//                 void (*disconnect_callback)(void*, int));
+//
+// int init_client(char* address, int port, int* input_socket_fd, void* suppliedptr, 
+//                 void (*server_message_callback)(void*, servermsg_t*), 
+//                 void (*disconnect_callback)(void*));
+//
 
- int main(int argc, char *argv[]){
 
-    //------------------------
-    // 1. Parse Arguments
-    //------------------------
-    args_t args;
-    
-    parseArgs(argc, argv, &args);
 
-    //------------------------
-    // 2. Load Map File
-    //------------------------
-    if(args.path == NULL){
+typedef struct clientlist {
+  int client_fds[1000];
+  int client_ids[1000];
+  bool ready[1000];
+  
+  int id_tab;
+  int num_clients;
+  int num_ready;
+    bool started;
+} clientlist_t;
 
-        fprintf(stderr, "\nERROR. Invalid pathname for map file.\n\n");
-        print(USAGE_MSG);
-        return 1;
+packet_t* client_message_callback(void* ptr, msg_t* message){
+  clientlist_t* state = (clientlist_t*)ptr;
+  char* contents = malloc(message->length + 1);
+  memcpy(contents, message->message, message->length);
+  contents[message->length] = '\0';
+  fprintf(stdout, "message received from client: %s\n", contents);
+  
+
+
+
+  //broadcast received message
+  packet_t* head = NULL;
+  packet_t* tail = NULL;
+
+
+
+  //---check Ready_Up--------
+
+        bool ready_up = false;
+        int client_id = -1;
+        for(int i = 0; i < state->num_clients; i++){
+            if(state->client_fds[i] == message->fd){
+                
+                if(strcmp(contents, "r") == 0 && state->ready[i] == 0 && state->started == false){
+                    state->ready[i] = 1;
+                    ready_up = true;
+                }
+                client_id = state->client_ids[i];
+            }
+        }
+        if (ready_up == true){
+        state->num_ready++;}
+
+    if(state->num_ready >= state->num_clients ){
+        if (state->started == false){
+            for(int i = 0; i < state->num_clients; i++){
+                packet_t* p = malloc(sizeof(packet_t));
+                p->fd = state->client_fds[i];
+                p->message = malloc(sizeof(int));
+                p->length = sizeof(int);
+                p->typecode = 3;
+                p->nextmessage = NULL;
+                if(head == NULL) head = p;
+                if(tail != NULL) tail->nextmessage = p;
+                tail = p;
+
+            }
+        }
+        state->started = true;
+        free(contents);
+        return head;
     }
 
-    FILE* mapFile = fopen(args.path, "r");or to the result of re-simulating from the old gamestate_server using only the newly acknowledged intents?
 
-    if(mapFile == NULL){
+  
 
-        fprintf(stderr, "\nError: Map file cannot be opened.\n\n");
-        print(USAGE_MSG);
-        return 1;
-    }
+  //package messages as intents and send
+  intent_t* intent = malloc(sizeof(intent_t));
+  intent->player_ID = client_id;
+  intent->command = contents[0];
 
-    //------------------------
-    // 3. Initialize Game
-    //------------------------
-    maps_t* maps = create_maps(mapFile);
-
-    fclose(mapFile);
-
-    //------------------------
-    // 4. Initialize Server
-    //------------------------
-    int port = message_init(stderr);
-
-    if(port == 0){
-        fprintf(stderr, "\nError: Failed to initialize network.\n");
-        return 1;
-    }
-
-    fprintf(stdout, "Network intialized at Port: %d\n", port);
-    
-    //------------------------
-    // 5. Enter Game Loop
-    //------------------------
-    
-    //------------------------
-    // 6. End Game
-    //------------------------
-    
-    //------------------------
-    // 7. Clean Up
-    //------------------------
-
-    return 0
+  for(int i = 0; i < state->num_clients; i++){
+      packet_t* p = malloc(sizeof(packet_t));
+      p->fd = state->client_fds[i];
+      p->message = malloc(sizeof(intent_t));
+      memcpy(p->message, intent, sizeof(intent_t));
+      p->length = sizeof(intent_t);
+      p->typecode = 0;
+      p->nextmessage = NULL;
+      if(head == NULL) head = p;
+      if(tail != NULL) tail->nextmessage = p;
+      tail = p;
+  }
+  free(contents);
+  free(intent);
+  return head;
 }
 
-/**************** parseargs ****************/
-/*
-
-    Takes arguments and populates passed args struct
-
-*/
-args_t parseArgs(int argc, char *argv[], args_t* args){
-
-    static struct option long_options[] = {
-        {"plain", no_argument, 0, 'p'},
-        {"gold", required_argument, 0, 'g'},
-        {"minpiles", required_argument, 0, 'l'},
-        {"maxpiles", required_argument, 0, 'h'},
-        {"seed", required_argument, 0, 's'},
-        {"blackholespawnrate", required_argument, 0, 'b'},
-        {0, 0, 0, 0}
-    };
-
-    int opt;
-    while((opt = getopt_long(argc, argv, "g:l:h:s:b:p", long_options, NULL)) != -1){
-        switch(opt){
-        case 'g':
-        
-            args->totalgold = atoi(optarg);
-            break;
-        case 'l':
-            
-            args->minpiles = atoi(optarg);
-            break;
-        case 'h':
-            
-            args->maxpiles = atoi(optarg);
-            break;
-        case 's':
-            
-            args->seed = atoi(optarg);
-            break;
-        case 'b':
-            
-            args->blackholespawnrate = atoi(optarg);
-            break;
-        case 'p':
-            
-            args->plain = false;
-            break;
-        case 0:
+packet_t* disconnect_callback(void* ptr, int fd){
+    clientlist_t* state = (clientlist_t*)ptr;
+    int client_id = -1;
+    for(int i = 0; i < state->num_clients; i++){
+        if(state->client_fds[i] == fd){
+            client_id = state->client_ids[i];
+            state->client_fds[i] = state->client_fds[--state->num_clients];
+            state->client_ids[i] = state->client_ids[state->num_clients];
+            if(state->ready[i] == 1){
+                state->num_ready--;
+                state->ready[i] = state->ready[state->num_clients];
+            }
             
             break;
-        default:
-            printUsage();
-            exit(1);  
         }
     }
+    fprintf(stdout, "client disconnected\n");
 
- }
+    if (client_id == -1){
+      fprintf(stderr, "Disconnection of unknown client");
+      return NULL;
+    }
+
+  //broadcast disconnect
+  packet_t* head = NULL;
+  packet_t* tail = NULL;
+  for(int i = 0; i < state->num_clients; i++){
+      packet_t* p = malloc(sizeof(packet_t));
+      p->fd = state->client_fds[i];
+      p->message = malloc(sizeof(int));
+      memcpy(p->message, &client_id, sizeof(int));
+      p->length = sizeof(int);
+      p->typecode = 2;
+      p->nextmessage = NULL;
+      if(head == NULL) head = p;
+      if(tail != NULL) tail->nextmessage = p;
+      tail = p;
+  }
+  return head;
+
+}
+
+packet_t* connect_callback(void* ptr, int num){
+  clientlist_t* state = (clientlist_t*)ptr;
+  int client_id = state->id_tab;
+  state->client_fds[state->num_clients] = num;
+  state->client_ids[state->num_clients++] = state->id_tab++;
 
 
-/**************** handleMessage ****************/
-/* Process message from client and respond accordingly.
- *
- * Caller provides: 
- *  arg   uncasted game_t struct
- *  from  client that sent message
- *  buf   buffer containing message
- *
- * We return:
- *  true if message was fulfilled successfully,
- *  false otherwise
- */
-static bool handleMessage(void* arg, const addr_t from, const char* buf){
+  packet_t* head = NULL;
+  packet_t* tail = NULL;
+
+  // send new client the IDs of all already-connected clients
+  for(int j = 0; j < state->num_clients - 1; j++){
+    packet_t* p = malloc(sizeof(packet_t));
+    p->fd = num;
+    p->message = malloc(sizeof(int));
+    memcpy(p->message, &state->client_ids[j], sizeof(int));
+    p->length = sizeof(int);
+    p->typecode = 1;
+    p->nextmessage = NULL;
+    if(head == NULL) head = p;
+    if(tail != NULL) tail->nextmessage = p;
+    tail = p;
+  }
+  fprintf(stdout, "Client Connected");
+  // broadcast new client's ID to everyone excluding itself
+  for(int i = 0; i < state->num_clients - 1; i++){
+    packet_t* p = malloc(sizeof(packet_t));
+    p->fd = state->client_fds[i];
+    p->message = malloc(sizeof(int));
+    memcpy(p->message, &client_id, sizeof(int));
+    p->length = sizeof(int);
+    p->typecode = 1;
+    p->nextmessage = NULL;
+    if(head == NULL) head = p;
+    if(tail != NULL) tail->nextmessage = p;
+    tail = p;
+  }
+  return head;
+}
+
+int main(int argc, char* argv[]){
+  clientlist_t broadcast = {0};
+  broadcast.id_tab = 0;
+  int socket_fd = init_server("localhost");
+while(true){
+    server_loop(&socket_fd, &broadcast, 100000, &client_message_callback, &connect_callback, &disconnect_callback);
+}
+}
