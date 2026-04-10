@@ -17,14 +17,14 @@ static const int MaxPort = 65535;
 
 
 
-int server_loop(int* fd0, void* suppliedptr,
-                packet_t* (*client_message_callback)(void*, clientmsg_t*), 
-                void(connect_callback)(void*, int),
-                void(disconnect_callback)(void*, int));
+int server_loop(int* fd0, void* suppliedptr, int timeout,
+                packet_t* (*client_message_callback)(void*, msg_t*), 
+                packet_t* (connect_callback)(void*, int),
+                packet_t* (disconnect_callback)(void*, int));
 
 
-int client_loop(int* clientfd, int* inputfd, void* suppliedptr, 
-                void (*receive_packet_callback)(void*, servermsg_t*), 
+int client_loop(int* clientfd, int* inputfd, int timeout, void* suppliedptr, 
+                void (*receive_packet_callback)(void*, msg_t*), 
                 void (*disconnect_callback)(void*));
 
 
@@ -132,10 +132,7 @@ int find_addr_index(struct sockaddr_in *addr, clientlist_t *clientlist){
   *
   * output - 1 on success, otherwise 0
   */
-int init_server(char* address, void* suppliedptr, 
-                packet_t* (*client_message_callback)(void*, clientmsg_t*),
-                void (*connect_callback)(void*, int),
-                void (*disconnect_callback)(void*, int))
+int init_server(char* address)
 {
   int socket_fd;
   if(address == NULL){
@@ -159,36 +156,44 @@ int init_server(char* address, void* suppliedptr,
   int instance = bind(socket_fd,(struct sockaddr *) &addr, addrlen);
   if(instance != 0){
     perror("ERROR: failed to bind socket");
-    return 1;
+    return -1;
   }
   //fetch port
   int portassignment = getsockname(socket_fd, (struct sockaddr * restrict)&addr,(socklen_t * restrict)&addrlen);
   if(portassignment != 0){
     perror("ERROR: failed to bind port");
-    return 1;
+    return -1;
   }
   int port = ntohs(addr.sin_port);
   if(port < MinPort || port > MaxPort){
     perror("ERROR: Invalid port");
-    return 1;
+    return -1;
   }
 
   int list = listen(socket_fd, SOMAXCONN);
   if(list != 0){
     perror("ERROR: failed to connect");
-    return 1;
+    return -1;
   }
   fprintf(stdout, "Server established at %s:%d\n", inet_ntoa(addr_in), port);
-  server_loop(&socket_fd, suppliedptr, client_message_callback, connect_callback, disconnect_callback);
-  return 0;
+  return socket_fd;
 }
 
 
 
-int server_loop(int* fd0, void* suppliedptr,
-                packet_t* (*client_message_callback)(void*, clientmsg_t*), 
-                void(connect_callback)(void*, int),
-                void(disconnect_callback)(void*, int))
+packet_t* append_packets(packet_t* a, packet_t* b){
+    if(a == NULL) return b;
+    packet_t* cur = a;
+    while(cur->nextmessage != NULL) cur = cur->nextmessage;
+    cur->nextmessage = b;
+    return a;
+}
+
+
+int server_loop(int* fd0, void* suppliedptr, int timeout,
+                packet_t* (*client_message_callback)(void*, msg_t*), 
+                packet_t* (*connect_callback)(void*, int),
+                packet_t* (*disconnect_callback)(void*, int))
 {
   int maxClients = 1000;
   struct pollfd fds[maxClients];
@@ -196,52 +201,122 @@ int server_loop(int* fd0, void* suppliedptr,
   fds[0].fd = *fd0;
   fds[0].events = POLLIN;
   while(true){
-    poll(fds, maxClients, 100);
-    //check for new connections
-    if(fds[0].revents & POLLIN){
-      for(int i = 0; i < maxClients; i++){
-        if(fds[i].fd == -1){
+    int ret = poll(fds, maxClients, timeout);
+    if (ret == 0) {return 0;}
+    if (ret < 0) {return 1;}
+
+    packet_t* packets = NULL;
+
+    //---------------------poll new connections---------------------
+    if(fds[0].revents & POLLIN){    //check for new connections
+      for(int i = 1; i < maxClients; i++){
+        if(fds[i].fd == -1){ // upon connection
           struct sockaddr_in clientaddr;
           socklen_t addr_len = sizeof(clientaddr);
           fds[i].fd = accept(fds[0].fd, (struct sockaddr *)&clientaddr, &addr_len);
-          connect_callback(suppliedptr, fds[i].fd);
+          
+          packets = append_packets(packets, connect_callback(suppliedptr, fds[i].fd));
           break;
         }
       }
     }
-    //check for incoming messages
-    for(int i = 1; i < maxClients; i++){
+
+
+    for(int i = 1; i < maxClients; i++){    //poll all clients
+
+      int err = 0;
       if(fds[i].fd != -1 && (fds[i].revents & POLLIN)){
-        char msg;
-        int len = recv(fds[i].fd, &msg, sizeof(char), 0);
-        if(len <= 0){
-          close(fds[i].fd);
-          disconnect_callback(suppliedptr, fds[i].fd);
-          fds[i].fd = -1;
-        }
-        //If received packet, update
-        else{
-          clientmsg_t message;
-          message.msg = msg;
-          message.fd = fds[i].fd;
-          packet_t* packets = client_message_callback(suppliedptr, &message);
-          while(packets != NULL){
-            int currfd = packets->fd;
-            uint32_t currlen = packets->length;
-            uint8_t typecode = packets->typecode;
-            unsigned char* message = packets->message;
-            send(currfd, &currlen, sizeof(currlen), 0);
-            send(currfd, &typecode, sizeof(typecode), 0);
-            send(currfd, message, currlen, 0);
-            packet_t* next = packets->nextmessage;
-            free(packets->message);
-            free(packets);
-            packets = next;
+        
+
+        //---------------------read message length---------------------
+        uint32_t msglen;
+        int slen = 0;
+        int n = 0;
+        while(slen != sizeof(uint32_t)){
+          n = recv(fds[i].fd, ((char*)&msglen) + slen, sizeof(uint32_t) - slen, 0);
+          if(n <= 0){
+            err = 1;
+            break;
           }
+          slen += n;
         }
+        
+        //---------------------read typecode---------------------
+        uint8_t typecode;
+        slen = 0;
+        n = 0;
+        while(slen != sizeof(uint8_t)){ 
+          n = recv(fds[i].fd, ((char*)&typecode) + slen, sizeof(uint8_t) - slen, 0);
+          if(n <= 0){
+            err = 1;
+            break;
+          }
+          slen += n;
+        }
+
+        //---------------------read message---------------------
+        char* message = malloc(sizeof(char) * msglen);
+        slen = 0;
+        n = 0;
+
+        while(slen != (int)(sizeof(char)*msglen)){ // read message based on size specified by the uint32 received
+          n = recv(fds[i].fd, message + slen, msglen - slen, 0);
+          if(n <= 0){
+            err = 1;
+            break;
+          }
+          slen += n;
+        }
+
+        //---------Collect Packets-----------
+        
+
+        msg_t* pkt = NULL;
+        if (err == 1){
+            free(message);
+            close(fds[i].fd); //error and/or disconnect
+            packets = append_packets(packets, disconnect_callback(suppliedptr, fds[i].fd));
+            fds[i].fd = -1;
+        }
+        else{
+          pkt = malloc(sizeof(msg_t)); //allocate a msg (should just replace with generic packet)
+          pkt->fd = fds[i].fd;
+          pkt->typecode = typecode;
+          pkt->length = msglen;
+          pkt->message = message;
+          packets = append_packets(packets, client_message_callback(suppliedptr, pkt));
+          free(pkt);
+          free(message);
+        }
+
       }
     }
+    
+        // debug before send loop
+    packet_t* debug = packets;
+    while(debug != NULL){
+        fprintf(stdout, "queued packet: fd=%d typecode=%d length=%d\n", 
+                debug->fd, debug->typecode, debug->length);
+                fflush(stdout);
+        debug = debug->nextmessage;
+    }
 
+
+
+    //---------Send Packets---------
+    while(packets != NULL){
+      int currfd = packets->fd;
+      uint32_t currlen = packets->length;
+      uint8_t typecode = packets->typecode;
+      unsigned char* message = packets->message;
+      send(currfd, &currlen, sizeof(currlen), 0);
+      send(currfd, &typecode, sizeof(typecode), 0);
+      send(currfd, message, currlen, 0);
+      packet_t* next = packets->nextmessage;
+      free(packets->message);
+      free(packets);
+      packets = next;
+    }
   }
 
 }
@@ -249,9 +324,9 @@ int server_loop(int* fd0, void* suppliedptr,
 
 
 
-int init_client(char* address, int port, int* input_socket_fd, void* suppliedptr, 
-                void (*server_message_callback)(void*, servermsg_t*), 
-                void (*disconnect_callback)(void*))
+
+
+int init_client(char* address, int port, int* input_socket_fd)
 {
 
   if(input_socket_fd == NULL){
@@ -280,35 +355,36 @@ int init_client(char* address, int port, int* input_socket_fd, void* suppliedptr
   int conn = connect(client_fd, (const struct sockaddr *)&addr, addrlen);
   if(conn != 0){
     perror("ERROR: failed to connect to server");
-    return 1;
+    return -1;
   }
   else{
     fprintf(stdout, "Established client connection to: %s:%d", address, port);
     fflush(stdout);
   }
-  client_loop(&client_fd, input_socket_fd, suppliedptr, server_message_callback, disconnect_callback);
-  return 0;
+  return client_fd;
 }
 
 
 
-int client_loop(int* clientfd, int* inputfd, void* suppliedptr, 
-                void (*server_message_callback)(void*, servermsg_t*), 
+int client_loop(int* clientfd, int* inputfd, int timeout,  void* suppliedptr, 
+                void (*server_message_callback)(void*, msg_t*), 
                 void (*disconnect_callback)(void*))
 {
-  struct pollfd fds[2];
+  struct pollfd fds[2];//establish file descriptors for polling
   fds[0].fd = *clientfd;
   fds[0].events = POLLIN;
   fds[1].fd = *inputfd;
   fds[1].events = POLLIN;
   while(true){
-    poll(fds, 2, -1);
-    if(fds[0].revents & POLLIN){
-      uint32_t msglen;
+    int ret = poll(fds, 2, timeout); //poll fds
+    if (ret == 0) {return 0;}
+    if (ret < 0) {return 1;}
+    if(fds[0].revents & POLLIN){ //if received data
+      uint32_t msglen; 
       int slen = 0;
       int n = 0;
-      while(slen != sizeof(uint32_t)){
-        n += recv(fds[0].fd, ((char*)&msglen) + slen, sizeof(uint32_t) - slen, 0);
+      while(slen != sizeof(uint32_t)){ //read one uint32_t
+        n = recv(fds[0].fd, ((char*)&msglen) + slen, sizeof(uint32_t) - slen, 0);
         if(n <= 0){
           fprintf(stderr, "Packet error");
           disconnect_callback(suppliedptr);
@@ -319,8 +395,8 @@ int client_loop(int* clientfd, int* inputfd, void* suppliedptr,
       uint8_t typecode;
       slen = 0;
       n = 0;
-      while(slen != sizeof(uint8_t)){
-        n += recv(fds[0].fd, ((char*)&typecode) + slen, sizeof(uint8_t) - slen, 0);
+      while(slen != sizeof(uint8_t)){ // read one uint8
+        n = recv(fds[0].fd, ((char*)&typecode) + slen, sizeof(uint8_t) - slen, 0);
         if(n <= 0){
           fprintf(stderr, "Packet error");
           disconnect_callback(suppliedptr);
@@ -331,20 +407,24 @@ int client_loop(int* clientfd, int* inputfd, void* suppliedptr,
       slen = 0;
       n = 0;
       char* message = malloc(sizeof(char) * msglen);
-      while(slen != (int)(sizeof(char)*msglen)){
-        n += recv(fds[0].fd, message + slen, msglen - slen, 0);
+      while(slen != (int)(sizeof(char)*msglen)){ // read message based on size specified by the uint32 received
+        n = recv(fds[0].fd, message + slen, msglen - slen, 0);
         if(n <= 0){
           fprintf(stderr, "Packet error");
+          free(message);
           disconnect_callback(suppliedptr);
           return 1;
         }
         slen += n;
       }
-      servermsg_t* pkt = malloc(sizeof(servermsg_t));;
+      msg_t* pkt = malloc(sizeof(msg_t));; //allocate a msg
+      pkt->fd = *clientfd;
       pkt->typecode = typecode;
       pkt->length = msglen;
       pkt->message = message;
       server_message_callback(suppliedptr, pkt);
+      free(pkt);
+      free(message);
     }
 
     if (fds[1].revents & POLLIN) {

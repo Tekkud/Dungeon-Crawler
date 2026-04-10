@@ -11,21 +11,13 @@ typedef struct packet{
 } packet_t;
 
 
-typedef struct servermsg{
+typedef struct msg{
+  int fd;
   uint8_t typecode;
   uint32_t length;
   char* message;
-} servermsg_t;
+} msg_t;
 
-typedef struct clientmsg{
-  char msg;
-  int fd;
-} clientmsg_t;
-
-typedef struct intent {
-  char intent;
-  int ID;
-} intent_t;
 
 /*************** init_server *****************
   *
@@ -69,10 +61,7 @@ t * The recvmsg_callback function will receive a clientmsg_t cast as void* and
   * output - 1 on success, otherwise 0
   */
 
-int init_server(char* address, void* suppliedptr, 
-                packet_t* (*client_message_callback)(void*, clientmsg_t*),
-                void (*connect_callback)(void*, int),
-                void (*disconnect_callback)(void*, int));
+int init_server(char* address);
 
 
 /************** init_client **************
@@ -85,8 +74,6 @@ int init_server(char* address, void* suppliedptr,
  *
  */
 
-int init_client(char* address, int port, int* input_socket_fd, void* suppliedptr, 
-                void (*server_message_callback)(void*, servermsg_t*), 
-                void (*disconnect_callback)(void*));
+int init_client(char* address, int port, int* input_socket_fd);
 
  
