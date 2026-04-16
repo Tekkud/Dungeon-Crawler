@@ -1,3 +1,4 @@
+#pragma once
 #include <stdint.h>
 
 
@@ -77,3 +78,13 @@ int init_server(char* address);
 int init_client(char* address, int port, int* input_socket_fd);
 
  
+
+int server_loop(int* fd0, void* suppliedptr, int timeout,
+                packet_t* (*client_message_callback)(void*, msg_t*), 
+                packet_t* (connect_callback)(void*, int),
+                packet_t* (disconnect_callback)(void*, int));
+
+
+int client_loop(int* clientfd, int* inputfd, int timeout, void* suppliedptr, 
+                void (*receive_packet_callback)(void*, msg_t*), 
+                void (*disconnect_callback)(void*));

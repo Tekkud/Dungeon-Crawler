@@ -5,16 +5,21 @@
 #include <stdbool.h>
 #include <string.h>
 #include <pthread.h>
-#include <GLFW/glfw3.h>
+#include "./Graphics_Libraries/glad/include/glad/glad.h" 
+#include "./Graphics_Libraries/glfw-3.4/include/GLFW/glfw3.h"
 #include "types.h"
-// int init_server(char* address, int* input_fd, void* suppliedptr, 
-//                 packet_t* (*client_message_callback)(void*, clientmsg_t*),
-//                 void (*disconnect_callback)(void*, int));
-//
-// int init_client(char* address, int port, int* input_socket_fd, void* suppliedptr, 
-//                 void (*server_message_callback)(void*, servermsg_t*), 
-//                 void (*disconnect_callback)(void*));
-//
+#include "maps.h"
+#include "labyrinth.h"
+#include "graphics.h"
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+
+
+//---------------------------------------------------
+//                     CONTROLLER LOOP
+//---------------------------------------------------
 
 
 //hmmm so which sort of information will clients be sending
@@ -31,9 +36,46 @@
 //latency
 
 
+
+
+void process_keys(char key, int action, char* string, char* truth){
+    if(action == GLFW_PRESS){
+      for(int i = MAX_KEYS - 2; i >= 0; i--){
+        string[i + 1] = string[i];
+        truth[i + 1] = truth[i];
+      }
+      string[0] = key;
+      truth[0] = '1';
+    }
+    if(action == GLFW_RELEASE){
+      for(int i = 0; i < MAX_KEYS; i++){
+          if(string[i] == key){
+            truth[i] = '0';
+          }
+      }
+    }
+}
+
+
+
+
+
+char get_key(GLFWwindow* window){
+    keys_t* keys = (keys_t*)glfwGetWindowUserPointer(window);
+    if(keys == NULL){ return 0; }
+    for(int i = 0; i < MAX_KEYS; i++){
+        if(keys->truth[i] == '1'){
+            return keys->string[i];
+        }
+    }
+    return 0;
+}
+
+
+//---------------------------------------------------
+//                     NETWORK
+//---------------------------------------------------
 void server_message_callback(void* nothing, msg_t* msg){
-
-
     
     //client processes
     // 0 - intentions
@@ -57,10 +99,10 @@ void server_message_callback(void* nothing, msg_t* msg){
     }
     else if (msg->typecode == 3){
         fprintf(stdout, "all clients ready");
+        fflush(stdout);
     }
 
 }
-
 
 
 void* network_thread(void* arg){
@@ -76,36 +118,140 @@ void* network_thread(void* arg){
 }
 
 
-void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods){
-    if(action == GLFW_PRESS || action == GLFW_REPEAT){
-        int writefd = *(int*)glfwGetWindowUserPointer(window);
-        char ch;
-        switch(key){
-            case GLFW_KEY_W: ch = 'w'; break;
-            case GLFW_KEY_A: ch = 'a'; break;
-            case GLFW_KEY_S: ch = 's'; break;
-            case GLFW_KEY_D: ch = 'd'; break;
-            case GLFW_KEY_R: ch = 'r'; break;
-            case GLFW_KEY_Q:
-                glfwSetWindowShouldClose(window, GLFW_TRUE);
-                return;
-            default: return;
-        }
 
-        uint32_t length = 1;
-        uint8_t typecode = 0;
-        write(writefd, &length, sizeof(uint32_t));
-        write(writefd, &typecode, sizeof(uint8_t));
-        write(writefd, &ch, sizeof(char));
+
+
+
+
+//---------------------------------------------------
+//                     CONTROLLER LOOP
+//---------------------------------------------------
+int game_loop(graphicEnv context, int write_fd){
+    //---------------Controller Loop-------------------
+    while(!glfwWindowShouldClose(context.window)){
+        glfwPollEvents();
+
+            unsigned int input_idle_counter = 0;
+        input_idle_counter++;
+
+        fprintf(stdout,"VAO: %u, VBO: %u, EBO: %u\n", context.VAO, context.VBO, context.EBO);
+        fflush(stdout);
+        printf("Number of indices: %d\n", context.num_indices);
+        fflush(stdout);
+        if(input_idle_counter >= 5){
+            char key = get_key(context.window);
+            if(key){
+
+                input_idle_counter = 0;
+                uint32_t length = 1;
+                uint8_t typecode = 0;
+                write(write_fd, &length, sizeof(uint32_t));
+                write(write_fd, &typecode, sizeof(uint8_t));
+                write(write_fd, &key, sizeof(char));
+            }
+        }
+        glClearColor(0.2f,0.34f,0.5f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        glUseProgram(context.shaderProgram);
+        glBindVertexArray(context.VAO);
+        glDrawElements(GL_TRIANGLES, context.num_indices, GL_UNSIGNED_INT, 0);
+        GLenum err = glGetError();
+        if (err != GL_NO_ERROR) {
+        fprintf(stderr, "OpenGL error: %d\n", err);
+        return 1;
+        }
+        glfwSwapBuffers(context.window);
+        glfwPollEvents();
+
+
+        usleep(16000);
+
     }
+    glDeleteVertexArrays(1, context.VAO);
+    glDeleteBuffers(1, context.VBO);
+    glDeleteProgram(context.shaderProgram);
+
+    glfwDestroyWindow(context.window);
+    glfwTerminate();
+    return 0;
 }
 
+/**************** mapToString ****************/
+/* see map.h for documentation */
+char* map_to_string(map_t* map, int level)
+{
+  if (map == NULL) {
+    fprintf(stderr, "Null Map Recieved In mapToString\n");
+    return NULL;
+  }
+
+
+  int sizex = map->bounds->x;
+  int sizey = map->bounds->y;
+  // Allocate memory for string
+  char* string = malloc(sizex*sizey*sizeof(char) + sizey*sizeof(char) + sizeof(char));
+  int k = 0;
+  for(int j = 0; j < map->bounds->y; j++){
+    for(int i = 0; i < map->bounds->x; i++){
+      char ch = map->grid[i][j][level];
+      if(ch == '\0'){
+        string[k] = ' ';
+        continue;
+      }
+      string[k] = map->grid[i][j][level];
+      k++;
+    }
+    string[k] = '\n';
+    k++;
+  }
+  string[k] = '\0';
+  
+  return string;
+}
 
 int main(int argc, char* argv[]){
     if(argv[1] == NULL){
         fprintf(stderr, "please provide port for client test\n");
         return 1;
     }
+
+
+    //---------------Initialize Maps-------------------
+
+
+
+    state_t params = {0};
+
+    char resolved[4096];
+    realpath("./Maps/main.txt", resolved);
+    fprintf(stderr, "Looking for map file at: %s\n", resolved);
+    params.map_file = fopen("./Maps/main.txt", "r");
+    if(params.map_file == NULL){
+        fprintf(stderr, "ERROR: could not open map file\n");
+        return 1;
+    }
+
+    // populate bounds->z before calling map_generate
+    params.bounds.z = 5; // adjust as needed
+
+    map_t* map = map_generate(&params);
+    if (map == NULL) {
+        fprintf(stderr, "ERROR: map_generate failed\n");
+        fclose(params.map_file);
+        return 1;
+    }
+
+    // print each level
+    for (int z = 0; z < params.bounds.z; z++) {
+        printf("--- Level %d ---\n", z);
+        char* str = mapToString(map, z);
+        if (str != NULL) {
+            printf("%s\n", str);
+            free(str);
+        }
+    }
+
 
     //---------------Initialize Network-------------------
     int input_socket_fd[2];
@@ -118,33 +264,33 @@ int main(int argc, char* argv[]){
     pthread_t network;
     pthread_create(&network, NULL, network_thread, fds);
 
-    //---------------Initialize Window-------------------
-    if(!glfwInit()){
-            fprintf(stderr, "failed to init glfw\n");
-            return 1;
-    }
+    //---------------Initialize GLFW-------------------
+    graphicEnv context = {0};
+    context.numrows = map->bounds->y;
+    context.numcols = map->bounds->x;
 
-    GLFWwindow* window = glfwCreateWindow(640, 480, "client", NULL, NULL);
-    if(!window){
-        fprintf(stderr, "failed to create window\n");
-        glfwTerminate();
+
+
+    if(context_init(context.numrows, context.numcols, &context)!= 0){ 
         return 1;
     }
 
-    glfwSetWindowUserPointer(window, &input_socket_fd[1]);
-    glfwSetKeyCallback(window, key_callback);
+    //need to fix problem here -- something wrong
+    //vao not initialized? Not sure. Something wrong..
+    
+      init_map_buffers(&context);
 
-    //---------------Initialize Maps-------------------
+
+    char* map_contiguous = map_to_string(map, 0);
+    update_map(map_contiguous, &context);
+
+    int a = game_loop(context, input_socket_fd[1]);
 
 
-
-    //---------------Controller Loop-------------------
-    while(!glfwWindowShouldClose(window)){
-        glfwPollEvents();
-    }
-
-    glfwDestroyWindow(window);
+    glfwDestroyWindow(context.window);
     glfwTerminate();
+    map_delete(map);
+    fclose(params.map_file);
     return 0;
 }
 

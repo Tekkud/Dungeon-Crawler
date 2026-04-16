@@ -3,9 +3,26 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 //Instantiation struct - everything game needs to initialize
 
 
+/*
+    Intent types:
+        0 - move up
+        1 - move down
+        2 - move left
+        3 - move right
+        4 - skip up
+        5 - skip down
+        6 - skip left
+        7 - skip rights
+*/
+
+typedef struct intents {
+    uint8_t player_ID; // maybe I'll add unique names in the future but for now a number id is fine
+    char command;
+} intent_t;
 
 //stores map boundaries
 typedef struct bounds {
