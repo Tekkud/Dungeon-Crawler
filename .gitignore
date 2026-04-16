@@ -1,0 +1,5 @@
+Client/Graphics_Libraries/glad/
+Client/Graphics_Libraries/glfw-3.4/
+Client/stb_image.h
+
+*.log
